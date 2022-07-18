@@ -5,6 +5,7 @@ Author: Ming
 Date: Jul 16, 2022
 """
 import numpy as np
+from sklearn import preprocessing
 from collections import defaultdict
 try:
     from cuml import DBSCAN
@@ -18,8 +19,10 @@ PRECISION = np.float16
 
 def cal_dist(left_matrix: np.ndarray or list, right_matrix=None, weight=0.9):
     if right_matrix is None:
-        return pdist(left_matrix, "euclidean") * weight + pdist(left_matrix, "cosine") * (1-weight)
-    return cdist(left_matrix, right_matrix, "euclidean") * weight + cdist(left_matrix, right_matrix, "cosine") * (1-weight)
+        return preprocessing.normalize(pdist(left_matrix, "euclidean")) * weight + \
+               pdist(left_matrix, "cosine") * (1-weight)
+    return preprocessing.normalize(cdist(left_matrix, right_matrix, "euclidean")) * weight + \
+           cdist(left_matrix, right_matrix, "cosine") * (1-weight)
 
 
 def get_camera_bias(frames):
@@ -51,8 +54,8 @@ def get_camera_bias(frames):
 def frame_level_matching(frames,
                          bias,
                          confidence_threshold=0.4,
-                         distance_threshold=10.,
-                         momentum=0.1,
+                         distance_threshold=1.,
+                         momentum=0.,
                          embedding_dim=256):
     """Distance Comparison with Moving Average"""
     # embeddings from last frame
@@ -91,8 +94,6 @@ def frame_level_matching(frames,
                 for i, assign in enumerate(assignment):
                     # Notation i means detection of the current frame;
                     # Notation assign means corresponding detection of the previous frame
-                    if i == assign:
-                        continue
                     if behavior_length[assign]:
                         prev_embedding = (1 - momentum) * prev[assign] + \
                                          momentum * behavior_embeddings[assign] / behavior_length[assign]
