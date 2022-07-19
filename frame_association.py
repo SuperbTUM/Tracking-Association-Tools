@@ -15,8 +15,16 @@ except ImportError:
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist, pdist
 import bisect
+from pydantic import BaseModel
 
 PRECISION = np.float16
+
+
+class Bbox(BaseModel):
+    leftX: float
+    topY: float
+    rightX: float
+    bottomY: float
 
 
 def cal_dist(left_matrix: np.ndarray or list, right_matrix=None, weight=0.9):
@@ -59,7 +67,7 @@ def cal_dist_spatio_temporal(left_embeddings,
                              left_bboxes,
                              right_bboxes,
                              weight=0.8):
-    return cal_dist(left_embeddings, right_embeddings) * weight + cal_iou(left_bboxes, right_bboxes) * (1 - weight)
+    return cal_dist(left_embeddings, right_embeddings) * weight + (1 - cal_iou(left_bboxes, right_bboxes)) * (1 - weight)
 
 
 def get_camera_bias(frames):
@@ -219,11 +227,17 @@ def frame_level_matching(frames,
             prev_bboxes = np.asarray(local_bboxes, dtype=object)
         else:
             length_prev = len(prev_embeddings)
-            for i, local_id in enumerate(local_ids):
-                if local_id not in seen_local_ids:
-                    # Possibly a new identity appears
-                    prev_embeddings = np.append(prev_embeddings, np.asarray([embeddings[i]], dtype=PRECISION), axis=0)
-                    prev_bboxes = np.append(prev_bboxes, np.asarray(local_bboxes[i]))
+            # for i, local_id in enumerate(local_ids):
+            #     if local_id not in seen_local_ids:
+            #         # Possibly a new identity appears
+            #         prev_embeddings = np.append(prev_embeddings, np.asarray([embeddings[i]], dtype=PRECISION), axis=0)
+            #         prev_bboxes = np.append(prev_bboxes, np.asarray(local_bboxes[i]))
+            while len(prev_embeddings) < len(embeddings):
+                prev_embeddings = np.append(prev_embeddings, [np.asarray([3 for _ in range(embedding_dim)], PRECISION)], 0)
+                prev_bboxes = np.append(prev_bboxes, np.asarray(Bbox(leftX=0.,
+                                                                     rightX=0.,
+                                                                     topY=0.,
+                                                                     bottomY=0.)))
             if embeddings:
                 ignored_embedding = 0
                 check_res, row_ind, col_ind = check_match(prev_embeddings,
