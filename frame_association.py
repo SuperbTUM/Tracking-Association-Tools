@@ -7,6 +7,7 @@ Date: Jul 16, 2022
 import numpy as np
 from sklearn import preprocessing
 from collections import defaultdict
+
 try:
     from cuml import DBSCAN
 except ImportError:
@@ -20,9 +21,9 @@ PRECISION = np.float16
 def cal_dist(left_matrix: np.ndarray or list, right_matrix=None, weight=0.9):
     if right_matrix is None:
         return preprocessing.normalize(pdist(left_matrix, "euclidean")) * weight + \
-               pdist(left_matrix, "cosine") * (1-weight)
+               pdist(left_matrix, "cosine") * (1 - weight)
     return preprocessing.normalize(cdist(left_matrix, right_matrix, "euclidean")) * weight + \
-           cdist(left_matrix, right_matrix, "cosine") * (1-weight)
+           cdist(left_matrix, right_matrix, "cosine") * (1 - weight)
 
 
 def get_camera_bias(frames):
@@ -49,6 +50,53 @@ def get_camera_bias(frames):
         mean_embeddings = valid_embeddings.mean(axis=0)
         bias[sensor] = mean_embeddings
     return bias
+
+
+def hungarian_matching(prev,
+                       embeddings,
+                       distance_threshold,
+                       behavior_embeddings,
+                       behavior_length,
+                       momentum):
+    max_distance = 0.
+    the_embedding = None
+    dist = cal_dist(prev, np.asarray(embeddings))
+    row_ind, col_ind = linear_sum_assignment(dist)
+    del dist
+    sorted_indices = np.argsort(col_ind)
+    assignment = row_ind[sorted_indices]
+    # Previous embeddings pending for update
+    for i, assign in enumerate(assignment):
+        # Notation i means detection of the current frame;
+        # Notation assign means corresponding detection of the previous frame
+        if behavior_length[assign]:
+            prev_embedding = (1 - momentum) * prev[assign] + \
+                             momentum * behavior_embeddings[assign] / behavior_length[assign]
+        else:
+            prev_embedding = prev[assign]
+        cur_embedding = embeddings[i]
+        pair_dist = cal_dist([prev_embedding], [cur_embedding])[0][0]
+        if pair_dist > distance_threshold:
+            # Find the one with maximum distance
+            if max_distance < pair_dist:
+                max_distance = pair_dist
+                the_embedding = cur_embedding
+    # Only extend one new ID
+    prev = np.append(prev, np.asarray([the_embedding], dtype=PRECISION), axis=0)
+    return prev
+
+
+def check_match(prev,
+                embeddings,
+                dist_threshold):
+    cost = cal_dist(prev, np.asarray(embeddings, dtype=PRECISION))
+    row_ind, col_ind = linear_sum_assignment(cost)
+    selected_costs = cost[row_ind, col_ind]
+    del cost
+    for c in selected_costs:
+        if c > dist_threshold:
+            return False, None, None
+    return True, row_ind, col_ind
 
 
 def frame_level_matching(frames,
@@ -85,30 +133,23 @@ def frame_level_matching(frames,
             while len(prev) < len(embeddings):
                 prev = np.append(prev, np.asarray([[3. for _ in range(embedding_dim)]], dtype=PRECISION), axis=0)
             if embeddings:
-                dist = cal_dist(prev, np.asarray(embeddings))
-                row_ind, col_ind = linear_sum_assignment(dist)
-                del dist
-                sorted_indices = np.argsort(col_ind)
-                assignment = row_ind[sorted_indices]
-                # Previous embeddings pending for update
-                for i, assign in enumerate(assignment):
-                    # Notation i means detection of the current frame;
-                    # Notation assign means corresponding detection of the previous frame
-                    if behavior_length[assign]:
-                        prev_embedding = (1 - momentum) * prev[assign] + \
-                                         momentum * behavior_embeddings[assign] / behavior_length[assign]
-                    else:
-                        prev_embedding = prev[assign]
-                    cur_embedding = embeddings[i]
-                    pair_dist = cal_dist([prev_embedding], [cur_embedding])[0][0]
-                    if pair_dist > distance_threshold:
-                        # Assign it to a new id
-                        prev = np.append(prev, np.asarray([cur_embedding], dtype=PRECISION), axis=0)
-                del assignment
-                # re-associate
-                cost = cal_dist(prev, np.asarray(embeddings, dtype=PRECISION))
-                row_ind, col_ind = linear_sum_assignment(cost)
-                del cost
+                check_res, row_ind, col_ind = check_match(prev,
+                                                          embeddings,
+                                                          distance_threshold)
+                while not check_res:
+                    # Only add one new ID
+                    prev_num_identities = len(prev)
+                    prev = hungarian_matching(prev,
+                                              embeddings,
+                                              distance_threshold,
+                                              behavior_embeddings,
+                                              behavior_length,
+                                              momentum)
+                    assert len(prev) == prev_num_identities + 1
+                    check_res, row_ind, col_ind = check_match(prev,
+                                                              embeddings,
+                                                              distance_threshold)
+                # Re-associate
                 sorted_indices = np.argsort(col_ind)
                 assignment = row_ind[sorted_indices]
                 for i, assign in enumerate(assignment):
