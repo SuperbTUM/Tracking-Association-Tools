@@ -45,7 +45,7 @@ def cal_iou(prev_bboxes, cur_bboxes):
         iou_topY = max(left_bbox_topY, right_bbox_topY)
         iou_bottomY = min(left_bbox_bottomY, right_bbox_bottomY)
         area_iou = (iou_rightX - iou_leftX + 1.) * (iou_bottomY - iou_topY + 1.)
-        return area_iou / (area_left + area_right)
+        return area_iou / (area_left + area_right - area_iou)
 
     iou_dists = np.ones((len(prev_bboxes), len(cur_bboxes)), PRECISION)
     for i in range(len(prev_bboxes)):
@@ -59,7 +59,7 @@ def cal_dist_spatio_temporal(left_embeddings,
                              left_bboxes,
                              right_bboxes,
                              weight=0.8):
-    return cal_dist(left_embeddings, right_embeddings) * weight + cal_iou(left_bboxes, right_bboxes) * (1-weight)
+    return cal_dist(left_embeddings, right_embeddings) * weight + cal_iou(left_bboxes, right_bboxes) * (1 - weight)
 
 
 def get_camera_bias(frames):
@@ -99,6 +99,7 @@ def hungarian_matching(prev,
                        spatio=False):
     max_distance = 0.
     the_embedding = None
+    the_bbox = None
     ignored_detection = None
     if spatio:
         dist = cal_dist_spatio_temporal(prev, embeddings, prev_bboxes, bboxes)
@@ -118,19 +119,29 @@ def hungarian_matching(prev,
         else:
             prev_embedding = prev[assign]
         cur_embedding = embeddings[i]
-        pair_dist = cal_dist([prev_embedding], [cur_embedding])[0][0]
+        prev_bbox = prev_bboxes[assign]
+        cur_bbox = bboxes[i]
+        if spatio:
+            pair_dist = cal_dist_spatio_temporal([prev_embedding], [cur_embedding], [prev_bbox], [cur_bbox])[0][0]
+        else:
+            pair_dist = cal_dist([prev_embedding], [cur_embedding])[0][0]
         if pair_dist > distance_threshold:
             # Find the one with maximum distance
             if max_distance < pair_dist:
                 max_distance = pair_dist
                 the_embedding = cur_embedding
+                the_bbox = cur_bbox
                 ignored_detection = i
     # Only extend one new ID
     prev = np.append(prev, np.asarray([the_embedding], dtype=PRECISION), axis=0)
+    prev_bboxes = np.append(prev_bboxes, np.asarray([the_bbox]), axis=0)
     ignored_embedding = embeddings[ignored_detection]
     embeddings.pop(ignored_detection)
     embeddings.append(ignored_embedding)
-    return prev, embeddings
+    ignored_bbox = bboxes[ignored_detection]
+    bboxes.pop(ignored_detection)
+    bboxes.append(ignored_bbox)
+    return prev, embeddings, prev_bboxes, bboxes
 
 
 def check_match(prev,
@@ -225,15 +236,15 @@ def frame_level_matching(frames,
                 while not check_res:
                     # Only add one new ID
                     ignored_embedding -= 1
-                    prev_embeddings, embeddings = hungarian_matching(prev_embeddings,
-                                                                     embeddings,
-                                                                     prev_bboxes,
-                                                                     local_bboxes,
-                                                                     distance_threshold,
-                                                                     behavior_embeddings,
-                                                                     behavior_length,
-                                                                     momentum,
-                                                                     spatio)
+                    prev_embeddings, embeddings, prev_bboxes, local_bboxes = hungarian_matching(prev_embeddings,
+                                                                                                embeddings,
+                                                                                                prev_bboxes,
+                                                                                                local_bboxes,
+                                                                                                distance_threshold,
+                                                                                                behavior_embeddings,
+                                                                                                behavior_length,
+                                                                                                momentum,
+                                                                                                spatio)
                     check_res, row_ind, col_ind = check_match(prev_embeddings,
                                                               embeddings,
                                                               prev_bboxes,
@@ -246,7 +257,7 @@ def frame_level_matching(frames,
                 assignment = row_ind[sorted_indices]
                 # If there is no assignment to the new identity, delete this identity
                 deleted_pending = []
-                if prev_embeddings and len(prev_embeddings) > length_prev:
+                if len(prev_embeddings) > length_prev:
                     for i in range(len(prev_embeddings) - 1, length_prev - 1, -1):
                         if i not in assignment:
                             deleted_pending.append(i)
@@ -254,7 +265,7 @@ def frame_level_matching(frames,
                 for i, assign in enumerate(assignment):
                     assignment[i] -= bisect.bisect_left(deleted_pending, assign)
                 # Delete unassigned identity in the possible new identities
-                prev_embeddings = np.delete(prev_embeddings, deleted_pending)
+                prev_embeddings = np.delete(prev_embeddings, deleted_pending, 0)
                 prev_bboxes = np.delete(prev_bboxes, deleted_pending)
                 for i, assign in enumerate(assignment):
                     labels[frame_id + "@" + sensor_id][local_ids[i]] = int(assign + 1)
