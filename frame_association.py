@@ -15,6 +15,7 @@ except ImportError:
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist, pdist
 import bisect
+from collections import deque
 from pydantic import BaseModel
 
 PRECISION = np.float16
@@ -31,11 +32,11 @@ def cal_dist(left_matrix: np.ndarray or list, right_matrix=None, weight=0.9):
     if right_matrix is None:
         return pdist(left_matrix, "euclidean") * weight + pdist(left_matrix, "cosine") * (1 - weight)
     return cdist(left_matrix, right_matrix, "euclidean") * weight + cdist(left_matrix, right_matrix, "cosine") * \
-           (1 - weight)
+                (1 - weight)
 
 
 def cal_iou(prev_bboxes, cur_bboxes):
-    def iou(left_bbox, right_bbox):
+    def giou(left_bbox, right_bbox):
         left_bbox_leftX = left_bbox.leftX
         left_bbox_topY = left_bbox.topY
         left_bbox_rightX = left_bbox.rightX
@@ -52,13 +53,22 @@ def cal_iou(prev_bboxes, cur_bboxes):
         iou_rightX = min(left_bbox_rightX, right_bbox_rightX)
         iou_topY = max(left_bbox_topY, right_bbox_topY)
         iou_bottomY = min(left_bbox_bottomY, right_bbox_bottomY)
+        if iou_rightX < iou_leftX or iou_bottomY < iou_topY:
+            return 0.
         area_iou = (iou_rightX - iou_leftX + 1.) * (iou_bottomY - iou_topY + 1.)
-        return area_iou / (area_left + area_right - area_iou)
+        full_coverage = (area_left + area_right - area_iou)
+
+        enclosed_leftX = min(left_bbox_leftX, right_bbox_leftX)
+        enclosed_rightX = max(left_bbox_rightX, right_bbox_rightX)
+        enclosed_topY = min(left_bbox_topY, right_bbox_topY)
+        enclosed_bottomY = max(left_bbox_bottomY, right_bbox_bottomY)
+        enclosed_area = (enclosed_rightX - enclosed_leftX + 1.) * (enclosed_bottomY - enclosed_topY + 1.)
+        return 1 - area_iou / full_coverage + (enclosed_area - area_iou) / enclosed_area
 
     iou_dists = np.ones((len(prev_bboxes), len(cur_bboxes)), PRECISION)
     for i in range(len(prev_bboxes)):
         for j in range(len(cur_bboxes)):
-            iou_dists[i, j] = iou(prev_bboxes[i], cur_bboxes[j])
+            iou_dists[i, j] = giou(prev_bboxes[i], cur_bboxes[j])
     return iou_dists
 
 
@@ -67,7 +77,7 @@ def cal_dist_spatio_temporal(left_embeddings,
                              left_bboxes,
                              right_bboxes,
                              weight=0.8):
-    return cal_dist(left_embeddings, right_embeddings) * weight + (1 - cal_iou(left_bboxes, right_bboxes)) * (1 - weight)
+    return cal_dist(left_embeddings, right_embeddings) * weight + cal_iou(left_bboxes, right_bboxes) * (1 - weight)
 
 
 def get_camera_bias(frames):
@@ -102,7 +112,6 @@ def hungarian_matching(prev,
                        bboxes,
                        distance_threshold,
                        behavior_embeddings,
-                       behavior_length,
                        momentum,
                        spatio=False):
     max_distance = 0.
@@ -121,18 +130,18 @@ def hungarian_matching(prev,
     for i, assign in enumerate(assignment):
         # Notation i means detection of the current frame;
         # Notation assign means corresponding detection of the previous frame
-        if behavior_length[assign]:
-            prev_embedding = (1 - momentum) * prev[assign] + \
-                             momentum * behavior_embeddings[assign] / behavior_length[assign]
+        if behavior_embeddings[assign]:
+            past_tracklets = np.asarray(list(behavior_embeddings[assign]), PRECISION)
+            prev_embedding = (1 - momentum) * prev[assign] + momentum * past_tracklets.mean(axis=0)
         else:
             prev_embedding = prev[assign]
         cur_embedding = embeddings[i]
         prev_bbox = prev_bboxes[assign]
         cur_bbox = bboxes[i]
         if spatio:
-            pair_dist = cal_dist_spatio_temporal([prev_embedding], [cur_embedding], [prev_bbox], [cur_bbox])[0][0]
+            pair_dist = cal_dist_spatio_temporal([prev_embedding], [cur_embedding], [prev_bbox], [cur_bbox])[0, 0]
         else:
-            pair_dist = cal_dist([prev_embedding], [cur_embedding])[0][0]
+            pair_dist = cal_dist([prev_embedding], [cur_embedding])[0, 0]
         if pair_dist > distance_threshold:
             # Find the one with maximum distance
             if max_distance < pair_dist:
@@ -191,6 +200,7 @@ def frame_level_matching(frames,
                          confidence_threshold=0.4,
                          distance_threshold=1.,
                          momentum=0.,
+                         smooth=10,
                          embedding_dim=256,
                          spatio=False):
     """Distance Comparison with Moving Average"""
@@ -198,8 +208,7 @@ def frame_level_matching(frames,
     prev_embeddings = None
     # bounding boxes from last frame
     prev_bboxes = None
-    behavior_embeddings = defaultdict(lambda: np.zeros((embedding_dim,), dtype=PRECISION))
-    behavior_length = defaultdict(int)
+    behavior_embeddings = defaultdict(lambda: deque([]))
     labels = defaultdict(dict)
     seen_local_ids = set()
     for frame in frames:
@@ -233,11 +242,12 @@ def frame_level_matching(frames,
             #         prev_embeddings = np.append(prev_embeddings, np.asarray([embeddings[i]], dtype=PRECISION), axis=0)
             #         prev_bboxes = np.append(prev_bboxes, np.asarray(local_bboxes[i]))
             while len(prev_embeddings) < len(embeddings):
-                prev_embeddings = np.append(prev_embeddings, [np.asarray([3 for _ in range(embedding_dim)], PRECISION)], 0)
-                prev_bboxes = np.append(prev_bboxes, np.asarray(Bbox(leftX=0.,
-                                                                     rightX=0.,
-                                                                     topY=0.,
-                                                                     bottomY=0.)))
+                prev_embeddings = np.append(prev_embeddings, [np.asarray([3 for _ in range(embedding_dim)], PRECISION)],
+                                            0)
+                prev_bboxes = np.append(prev_bboxes, np.asarray([Bbox(leftX=0.,
+                                                                      rightX=0.,
+                                                                      topY=0.,
+                                                                      bottomY=0.)]))
             if embeddings:
                 ignored_embedding = 0
                 check_res, row_ind, col_ind = check_match(prev_embeddings,
@@ -256,7 +266,6 @@ def frame_level_matching(frames,
                                                                                                 local_bboxes,
                                                                                                 distance_threshold,
                                                                                                 behavior_embeddings,
-                                                                                                behavior_length,
                                                                                                 momentum,
                                                                                                 spatio)
                     check_res, row_ind, col_ind = check_match(prev_embeddings,
@@ -283,8 +292,9 @@ def frame_level_matching(frames,
                 prev_bboxes = np.delete(prev_bboxes, deleted_pending)
                 for i, assign in enumerate(assignment):
                     labels[frame_id + "@" + sensor_id][local_ids[i]] = int(assign + 1)
-                    behavior_embeddings[assign] += np.asarray(embeddings[i], dtype=PRECISION)
-                    behavior_length[assign] += 1
+                    while len(behavior_embeddings[assign]) >= smooth:
+                        behavior_embeddings[assign].popleft()
+                    behavior_embeddings[assign].append(np.asarray(embeddings[i], dtype=PRECISION))
                     prev_embeddings[assign] = embeddings[i]
                     prev_bboxes[assign] = local_bboxes[i]
             seen_local_ids.update(local_ids)
