@@ -53,7 +53,10 @@ def cal_iou(prev_bboxes, cur_bboxes):
         iou_rightX = min(left_bbox_rightX, right_bbox_rightX)
         iou_topY = max(left_bbox_topY, right_bbox_topY)
         iou_bottomY = min(left_bbox_bottomY, right_bbox_bottomY)
-        area_iou = max(0., (iou_rightX - iou_leftX + 1.) * (iou_bottomY - iou_topY + 1.))
+        if iou_rightX < iou_leftX or iou_bottomY < iou_topY:
+            area_iou = 0.
+        else:
+            area_iou = max(0., (iou_rightX - iou_leftX + 1.) * (iou_bottomY - iou_topY + 1.))
         full_coverage = (area_left + area_right - area_iou)
 
         enclosed_leftX = min(left_bbox_leftX, right_bbox_leftX)
@@ -202,6 +205,7 @@ def frame_level_matching(frames,
                          embedding_dim=256,
                          spatio=False):
     """Distance Comparison with Moving Average"""
+    spatio_copy = spatio
     # embeddings from last frame
     prev_embeddings = None
     # bounding boxes from last frame
@@ -209,6 +213,8 @@ def frame_level_matching(frames,
     behavior_embeddings = defaultdict(lambda: deque([]))
     labels = defaultdict(dict)
     seen_local_ids = set()
+    # Check if there is a sensor switch
+    cur_sensor = None
     for frame in frames:
         frame_id = frame.id
         sensor_id = frame.sensorId
@@ -232,13 +238,18 @@ def frame_level_matching(frames,
             for i, Id in enumerate(local_ids):
                 labels[frame_id + "@" + sensor_id][Id] = int(i + 1)
             prev_bboxes = np.asarray(local_bboxes, dtype=object)
+            cur_sensor = sensor_id
         else:
+            if sensor_id != cur_sensor:
+                # No spatial info
+                spatio = False
+                for global_index in behavior_embeddings:
+                    tracklets_history = np.asarray(behavior_embeddings[global_index], PRECISION)
+                    embedding_mean = tracklets_history.mean(axis=0)
+                    prev_embeddings[global_index] = embedding_mean
+            else:
+                spatio = spatio_copy
             length_prev = len(prev_embeddings)
-            # for i, local_id in enumerate(local_ids):
-            #     if local_id not in seen_local_ids:
-            #         # Possibly a new identity appears
-            #         prev_embeddings = np.append(prev_embeddings, np.asarray([embeddings[i]], dtype=PRECISION), axis=0)
-            #         prev_bboxes = np.append(prev_bboxes, np.asarray(local_bboxes[i]))
             while len(prev_embeddings) < len(embeddings):
                 prev_embeddings = np.append(prev_embeddings, [np.asarray([3 for _ in range(embedding_dim)], PRECISION)],
                                             0)
@@ -296,6 +307,7 @@ def frame_level_matching(frames,
                     prev_embeddings[assign] = embeddings[i]
                     prev_bboxes[assign] = local_bboxes[i]
             seen_local_ids.update(local_ids)
+            cur_sensor = sensor_id
     with open("results.json", "w") as f:
         json.dump(labels, f)
     return labels
