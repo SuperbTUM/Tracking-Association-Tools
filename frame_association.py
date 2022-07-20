@@ -53,9 +53,7 @@ def cal_iou(prev_bboxes, cur_bboxes):
         iou_rightX = min(left_bbox_rightX, right_bbox_rightX)
         iou_topY = max(left_bbox_topY, right_bbox_topY)
         iou_bottomY = min(left_bbox_bottomY, right_bbox_bottomY)
-        if iou_rightX < iou_leftX or iou_bottomY < iou_topY:
-            return 0.
-        area_iou = (iou_rightX - iou_leftX + 1.) * (iou_bottomY - iou_topY + 1.)
+        area_iou = max(0., (iou_rightX - iou_leftX + 1.) * (iou_bottomY - iou_topY + 1.))
         full_coverage = (area_left + area_right - area_iou)
 
         enclosed_leftX = min(left_bbox_leftX, right_bbox_leftX)
