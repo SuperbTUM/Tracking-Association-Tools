@@ -18,6 +18,8 @@ import bisect
 from collections import deque
 from pydantic import BaseModel
 
+from reranking import re_ranking_numpy
+
 PRECISION = np.float16
 
 
@@ -107,6 +109,14 @@ def get_camera_bias(frames):
     return bias
 
 
+def check_dramatic_change(prev_bbox, cur_bbox):
+    aspect_ratio_prev = (prev_bbox.rightX - prev_bbox.leftX + 1.) / (prev_bbox.bottomY - prev_bbox.topY + 1.)
+    aspect_ratio_cur = (cur_bbox.rightX - cur_bbox.leftX + 1.) / (cur_bbox.bottomY - cur_bbox.topY + 1.)
+    if abs(aspect_ratio_cur - aspect_ratio_prev) > 0.5:
+        return True
+    return False
+
+
 def hungarian_matching(prev,
                        embeddings,
                        prev_bboxes,
@@ -114,12 +124,15 @@ def hungarian_matching(prev,
                        distance_threshold,
                        behavior_embeddings,
                        momentum,
-                       spatio=False):
+                       spatio=False,
+                       rerank=False):
     max_distance = 0.
     the_embedding = None
     the_bbox = None
     ignored_detection = None
-    if spatio:
+    if rerank:
+        dist = re_ranking_numpy(embeddings, prev, 14, 3, 0.3)
+    elif spatio:
         dist = cal_dist_spatio_temporal(prev, embeddings, prev_bboxes, bboxes)
     else:
         dist = cal_dist(prev, np.asarray(embeddings))
@@ -168,7 +181,8 @@ def check_match(prev,
                 bboxes,
                 dist_threshold,
                 ignored_embedding=0,
-                spatio=False):
+                spatio=False,
+                rerank=False):
     if ignored_embedding < 0:
         prev_ = prev[:ignored_embedding]
         embeddings_ = embeddings[:ignored_embedding]
@@ -179,7 +193,9 @@ def check_match(prev,
         embeddings_ = embeddings.copy()
         prev_bboxes_ = prev_bboxes.copy()
         bboxes_ = bboxes.copy()
-    if spatio:
+    if rerank:
+        cost = re_ranking_numpy(embeddings_, prev_, 14, 3, 0.3)
+    elif spatio:
         cost = cal_dist_spatio_temporal(prev_, np.asarray(embeddings_, dtype=PRECISION), prev_bboxes_, bboxes_)
     else:
         cost = cal_dist(prev_, np.asarray(embeddings_, dtype=PRECISION))
@@ -203,7 +219,8 @@ def frame_level_matching(frames,
                          momentum=0.,
                          smooth=10,
                          embedding_dim=256,
-                         spatio=False):
+                         spatio=False,
+                         rerank=False):
     """Distance Comparison with Moving Average"""
     spatio_copy = spatio
     # embeddings from last frame
@@ -265,7 +282,8 @@ def frame_level_matching(frames,
                                                           local_bboxes,
                                                           distance_threshold,
                                                           ignored_embedding,
-                                                          spatio)
+                                                          spatio,
+                                                          rerank)
                 while not check_res:
                     # Only add one new ID
                     ignored_embedding -= 1
@@ -276,14 +294,16 @@ def frame_level_matching(frames,
                                                                                                 distance_threshold,
                                                                                                 behavior_embeddings,
                                                                                                 momentum,
-                                                                                                spatio)
+                                                                                                spatio,
+                                                                                                rerank)
                     check_res, row_ind, col_ind = check_match(prev_embeddings,
                                                               embeddings,
                                                               prev_bboxes,
                                                               local_bboxes,
                                                               distance_threshold,
                                                               ignored_embedding,
-                                                              spatio)
+                                                              spatio,
+                                                              rerank)
                 # Re-associate
                 sorted_indices = np.argsort(col_ind)
                 assignment = row_ind[sorted_indices]
@@ -303,7 +323,8 @@ def frame_level_matching(frames,
                     labels[frame_id + "@" + sensor_id][local_ids[i]] = int(assign + 1)
                     while len(behavior_embeddings[assign]) >= smooth:
                         behavior_embeddings[assign].popleft()
-                    behavior_embeddings[assign].append(np.asarray(embeddings[i], dtype=PRECISION))
+                    if not check_dramatic_change(prev_bboxes[assign], local_bboxes[i]):
+                        behavior_embeddings[assign].append(np.asarray(embeddings[i], dtype=PRECISION))
                     prev_embeddings[assign] = embeddings[i]
                     prev_bboxes[assign] = local_bboxes[i]
             seen_local_ids.update(local_ids)
