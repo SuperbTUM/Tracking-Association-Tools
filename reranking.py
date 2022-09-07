@@ -285,7 +285,7 @@ import gnn_propagate
 def gnn_reranking(X_q, X_g, k1, k2):
     query_num, gallery_num = X_q.shape[0], X_g.shape[0]
 
-    X_u = torch.cat((X_q, X_g), axis = 0)
+    X_u = torch.cat((X_q, X_g), dim=0)
     original_score = torch.mm(X_u, X_u.t())
     del X_u, X_q, X_g
 
