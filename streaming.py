@@ -1,11 +1,20 @@
 from kafka import KafkaProducer, KafkaConsumer
+from kafka.admin import KafkaAdminClient, NewTopic
 # Add configuration
 import ast
 import json
 
 
+def create_topic(topic_name):
+    admin_client = KafkaAdminClient(bootstrap_servers="localhost:9092",
+                                    client_id="test")
+    topic_list = (NewTopic(name=topic_name, num_partitions=1, replication_factor=1), )
+    admin_client.create_topics(new_topics=topic_list, validate_only=False)
+
+
 def init_producer():
     return KafkaProducer(bootstrap_servers="localhost:9092",
+                         api_version=(1, 0, 0),
                          key_serializer=lambda k: json.dumps(k).encode(),
                          value_serializer=lambda v: json.dumps(v).encode())
 
@@ -22,14 +31,8 @@ def init_consumer(topic, timeout=1000):
 
 def produce_record(producer, topic, data, partition):
     """data could be a few lines"""
-
-    def callback(err, msg):
-        if err:
-            print("%% Msg failed delivery: %s \n", err)
-        else:
-            print("%% Msg delivered to %s [%d] \n" % (msg.topic(), msg.partition()))
     for line in data:
-        producer.send(topic=topic, partition=partition, value=line, callback=callback)
+        producer.send(topic=topic, partition=partition, value=line)
         producer.poll(1.0)
         partition += 1
     producer.flush()
